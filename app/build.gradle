@@ -9,5 +9,7 @@ android {
         versionCode 1
         versionName '0.1'
     }
+    // Personal Android 12 prototype, not a Google Play submission. Keep this finding visible as a warning.
+    lint { warning 'ExpiredTargetSdkVersion' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
