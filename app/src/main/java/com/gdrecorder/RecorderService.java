@@ -24,6 +24,9 @@ public class RecorderService extends Service {
     MediaMuxer muxer;
     android.os.ParcelFileDescriptor descriptor;
     Uri output;
+    long videoSamples=0, firstVideoUs=-1, lastVideoUs=-1;
+    String codecName="";
+    int configuredWidth,configuredHeight,configuredRate,configuredBitrate;
     int videoTrack=-1,audioTrack=-1;
     boolean muxStarted=false, wantAudio;
     static class Sample {
@@ -57,8 +60,9 @@ public class RecorderService extends Service {
             android.util.DisplayMetrics metrics=new android.util.DisplayMetrics();
             getSystemService(android.hardware.display.DisplayManager.class).getDisplay(android.view.Display.DEFAULT_DISPLAY).getRealMetrics(metrics);
             int width,height;
-            if(metrics.widthPixels>=metrics.heightPixels){height=shortSide;width=(int)Math.round((double)shortSide*metrics.widthPixels/metrics.heightPixels/2)*2;}
-            else {width=shortSide;height=(int)Math.round((double)shortSide*metrics.heightPixels/metrics.widthPixels/2)*2;}
+            height=shortSide; width=shortSide==1080?1920:1280;
+            configuredWidth=width;configuredHeight=height;configuredRate=rate;
+            boolean experimental=intent.getBooleanExtra("experimental",false);
             MediaCodecInfo chosen=null;
             for(MediaCodecInfo codec:new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()){
                 if(!codec.isEncoder() || !codec.isHardwareAccelerated())continue;
@@ -66,15 +70,17 @@ public class RecorderService extends Service {
                     MediaCodecInfo.CodecCapabilities caps=codec.getCapabilitiesForType("video/avc");
                     boolean supportsSurface=false;
                     for(int color:caps.colorFormats)if(color==MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)supportsSurface=true;
-                    if(supportsSurface && caps.getVideoCapabilities().areSizeAndRateSupported(width,height,rate)){chosen=codec;break;}
+                    if(supportsSurface && caps.getVideoCapabilities().isSizeSupported(width,height) && (experimental || caps.getVideoCapabilities().areSizeAndRateSupported(width,height,rate))){chosen=codec;break;}
                 }catch(IllegalArgumentException ignored){}
             }
             if(chosen==null)throw new Exception("El codificador no admite esta resolución y FPS. Prueba 720p o 60 fps.");
-            video=MediaCodec.createByCodecName(chosen.getName());
+            codecName=chosen.getName();
+            video=MediaCodec.createByCodecName(codecName);
             MediaFormat vf=MediaFormat.createVideoFormat("video/avc",width,height);
             vf.setInteger(MediaFormat.KEY_COLOR_FORMAT,MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
             android.util.Range<Integer> range=chosen.getCapabilitiesForType("video/avc").getVideoCapabilities().getBitrateRange();
-            vf.setInteger(MediaFormat.KEY_BIT_RATE,range.clamp(intent.getIntExtra("bitrate",16000000)));
+            configuredBitrate=range.clamp(intent.getIntExtra("bitrate",24000000));
+            vf.setInteger(MediaFormat.KEY_BIT_RATE,configuredBitrate);
             vf.setInteger(MediaFormat.KEY_FRAME_RATE,rate);vf.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL,2);
             video.configure(vf,null,null,MediaCodec.CONFIGURE_FLAG_ENCODE);surface=video.createInputSurface();video.start();
             projection=getSystemService(MediaProjectionManager.class).getMediaProjection(intent.getIntExtra("result",-1),intent.getParcelableExtra("grant"));
@@ -132,6 +138,8 @@ public class RecorderService extends Service {
             }
             if(!muxStarted)throw new Exception("La grabación fue demasiado corta.");
             muxer.stop();success=true;
+            double measured=videoSamples>1 && lastVideoUs>firstVideoUs ? (videoSamples-1)*1000000.0/(lastVideoUs-firstVideoUs):0;
+            message=String.format(java.util.Locale.US,"Guardado: %d × %d · %.1f FPS codificados (solicitados: %d) · %.1f Mbps configurados\n%s",configuredWidth,configuredHeight,measured,configuredRate,configuredBitrate/1000000.0,codecName);
         }catch(Exception e){message="No se guardó: "+e.getMessage();}
         finally{
             running.set(false);
@@ -146,6 +154,7 @@ public class RecorderService extends Service {
                 if(success){ContentValues done=new ContentValues();done.put(MediaStore.Video.Media.IS_PENDING,0);getContentResolver().update(output,done,null,null);}
                 else getContentResolver().delete(output,null,null);
             }
+            getSharedPreferences("recording",MODE_PRIVATE).edit().putString("last",message).apply();
             final String notice=message;main.post(()->android.widget.Toast.makeText(this,notice,android.widget.Toast.LENGTH_LONG).show());
             stopForeground(true);stopSelf();
         }
@@ -164,7 +173,11 @@ public class RecorderService extends Service {
                 try{
                     if(info.size>0 && (info.flags&MediaCodec.BUFFER_FLAG_CODEC_CONFIG)==0){
                         ByteBuffer buffer=codec.getOutputBuffer(index);buffer.position(info.offset);buffer.limit(info.offset+info.size);
-                        if(isVideo)info.presentationTimeUs=Math.max(0,info.presentationTimeUs-origin);
+                        if(isVideo){
+                            info.presentationTimeUs=Math.max(0,info.presentationTimeUs-origin);
+                            if(firstVideoUs<0)firstVideoUs=info.presentationTimeUs;
+                            lastVideoUs=info.presentationTimeUs;videoSamples++;
+                        }
                         if(muxStarted)muxer.writeSampleData(isVideo?videoTrack:audioTrack,buffer,info);
                         else {
                             if(pendingBytes+info.size>16000000)throw new IllegalStateException("El audio o video no inició a tiempo.");

@@ -6,8 +6,8 @@ android {
         applicationId 'com.gdrecorder'
         minSdk 29
         targetSdk 32
-        versionCode 1
-        versionName '0.1'
+        versionCode 2
+        versionName '0.2'
     }
     // Personal Android 12 prototype, not a Google Play submission. Keep this finding visible as a warning.
     lint { warning 'ExpiredTargetSdkVersion' }
